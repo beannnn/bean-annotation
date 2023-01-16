@@ -129,12 +129,14 @@ client_close(struct context *ctx, struct conn *conn)
 
     client_close_stats(ctx, conn->owner, conn->err, conn->eof);
 
+    // 如果这个fd是非法的，直接unref，同时释放conn资源
     if (conn->sd < 0) {
         conn->unref(conn);
         conn_put(conn);
         return;
     }
 
+    // 如果存在request msg，直接返回
     msg = conn->rmsg;
     if (msg != NULL) {
         conn->rmsg = NULL;
@@ -146,6 +148,10 @@ client_close(struct context *ctx, struct conn *conn)
                   "%"PRIu32" type %d", conn->sd, msg->id, msg->mlen,
                   msg->type);
 
+        // 释放request信息
+        // 查看是否存在peer，如果存在首先释放peer
+        // msg-rbtree中删除这个msg
+        // 释放msg资源 msg_put: 1. 释放mbuf内容 2. 本身内容释放 3. 串入msg free-list
         req_put(msg);
     }
 
@@ -165,6 +171,9 @@ client_close(struct context *ctx, struct conn *conn)
                       msg->type);
             req_put(msg);
         } else {
+            // 如果还没有处理完，这个时候已经发送给backend connection queue中了
+            // 设置这个flag是为了让处理rsp知道这个req已经不需要在进行进一步处理了
+            // 得到rsp之后就去关闭
             msg->swallow = 1;
 
             ASSERT(msg->request);
@@ -177,13 +186,16 @@ client_close(struct context *ctx, struct conn *conn)
     }
     ASSERT(TAILQ_EMPTY(&conn->omsg_q));
 
+    // unref就是释放与pool之间的联系
     conn->unref(conn);
 
+    // 关闭fd
     status = close(conn->sd);
     if (status < 0) {
         log_error("close c %d failed, ignored: %s", conn->sd, strerror(errno));
     }
     conn->sd = -1;
 
+    // 释放conn资源，串入 conn的free_list
     conn_put(conn);
 }
